@@ -147,6 +147,19 @@ async function connectToMongo() {
     // -----------------------------------------------------
 
     console.log("✅ Groups collections and indexes are ready.");
+
+    // --- NEW: Setup for Stories (Phase 1) ---
+    storiesCollection = db.collection("stories");
+
+    // 1. TTL Index: Auto-delete stories after 24 hours (86400 seconds)
+    await storiesCollection.createIndex({ "createdAt": 1 }, { expireAfterSeconds: 86400 });
+
+    // 2. Lookup Index: Find stories by the owner's public key
+    await storiesCollection.createIndex({ ownerPubKey: 1 });
+
+    console.log("✅ Stories collection and TTL indexes are ready.");
+    // --- END NEW ---
+      
     // --- END NEW: Setup for Groups ---
     // --- END NEW ---
     // --- END NEW ---
@@ -318,23 +331,6 @@ app.post("/claim-id", async (req, res) => {
             if(decoded.statusText) updateDoc.$set.statusText = decoded.statusText;
             if(decoded.ecdhPubKey) updateDoc.$set.ecdhPubKey = decoded.ecdhPubKey;
             
-            // --- FIX: Capture the Update/Story Data ---
-            // The client sends these fields inside the inviteData object
-            if(decoded.updateText !== undefined) { 
-                updateDoc.$set.updateText = decoded.updateText; 
-            }
-            if(decoded.updateColor !== undefined) { 
-                updateDoc.$set.updateColor = decoded.updateColor; 
-            }
-            // Always set a timestamp if there is text, otherwise nullify it
-            if(decoded.updateText) {
-                updateDoc.$set.updateTimestamp = new Date();
-            } else {
-                // If text is empty string, it means "delete update"
-                updateDoc.$set.updateTimestamp = null;
-            }
-            // -------------------------------------------
-
         } catch (e) {
             console.warn(`[Server] Failed to parse metadata for ${customId}. Saving blob only.`);
         }
@@ -2119,6 +2115,112 @@ app.post("/group/leave", async (req, res) => {
         res.status(500).json({ error: "Server error leaving group." });
     }
 });
+
+// --- START: Stories API (Phase 1) ---
+
+/**
+ * [AUTHENTICATED] Post a new Story.
+ * Stores encrypted blob with a 24h TTL.
+ */
+app.post("/stories/post", async (req, res) => {
+    const { pubKey, signature, encryptedBlob, thumbnailBlob, mediaType, duration } = req.body;
+
+    if (!pubKey || !signature || !encryptedBlob || !mediaType) {
+        return res.status(400).json({ error: "Missing required fields." });
+    }
+
+    // 1. Enforce Size Limits (Prevent server overload)
+    // Blob size check (approx 5MB limit for main media)
+    const blobSize = Buffer.byteLength(encryptedBlob, 'utf8');
+    if (blobSize > 5 * 1024 * 1024) {
+        return res.status(413).json({ error: "Story is too large. Max 5MB." });
+    }
+
+    try {
+        // 2. Verify Signature (User signs the encryptedBlob string to prove ownership)
+        // We sign the blob itself (or a hash of it) to ensure integrity.
+        // For simplicity/speed here, we assume client signed the 'encryptedBlob' string.
+        const isAuthentic = await verifySignature(pubKey, signature, encryptedBlob);
+        if (!isAuthentic) {
+            return res.status(403).json({ error: "Invalid signature." });
+        }
+
+        // 3. Store in DB
+        const newStory = {
+            ownerPubKey: pubKey,
+            mediaType: mediaType, // 'image' or 'video'
+            duration: duration || 5000, // Client tells us how long to play it
+            encryptedBlob: encryptedBlob, // The heavy data
+            thumbnailBlob: thumbnailBlob || null, // Small preview
+            createdAt: new Date() // TTL index uses this
+        };
+
+        const result = await storiesCollection.insertOne(newStory);
+        
+        console.log(`📸 New Story posted by ${pubKey.slice(0, 10)}...`);
+        res.status(201).json({ success: true, storyId: result.insertedId });
+
+    } catch (err) {
+        console.error("Story post error:", err);
+        res.status(500).json({ error: "Server error posting story." });
+    }
+});
+
+/**
+ * [PUBLIC] List active stories for a user.
+ * Returns IDs and Thumbnails only (Lightweight).
+ */
+app.get("/stories/list/:pubKey", async (req, res) => {
+    const { pubKey } = req.params;
+    
+    // Allow checking any user (Public read, but content is encrypted)
+    try {
+        const activeStories = await storiesCollection.find(
+            { ownerPubKey: pubKey },
+            { 
+                projection: { 
+                    _id: 1, 
+                    createdAt: 1, 
+                    thumbnailBlob: 1, 
+                    mediaType: 1,
+                    duration: 1
+                } 
+            }
+        ).sort({ createdAt: 1 }).toArray(); // Oldest first (chronological)
+
+        res.json(activeStories);
+
+    } catch (err) {
+        console.error("Story list error:", err);
+        res.status(500).json({ error: "Server error fetching list." });
+    }
+});
+
+/**
+ * [PUBLIC] Fetch the full media blob for a specific story.
+ */
+app.get("/stories/fetch/:storyId", async (req, res) => {
+    const { storyId } = req.params;
+
+    try {
+        const story = await storiesCollection.findOne(
+            { _id: new ObjectId(storyId) },
+            { projection: { encryptedBlob: 1, ownerPubKey: 1 } }
+        );
+
+        if (!story) {
+            return res.status(404).json({ error: "Story not found or expired." });
+        }
+
+        res.json(story);
+
+    } catch (err) {
+        console.error("Story fetch error:", err);
+        res.status(500).json({ error: "Server error fetching story." });
+    }
+});
+// --- END: Stories API ---
+
 // --- START: Simple Rate Limiting ---
 
 // --- START: Simple Rate Limiting ---
