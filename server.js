@@ -2197,6 +2197,44 @@ app.get("/stories/list/:pubKey", async (req, res) => {
 });
 
 /**
+ * [AUTHENTICATED] Delete a specific story.
+ */
+app.post("/stories/delete", async (req, res) => {
+    const { storyId, pubKey, signature } = req.body;
+
+    if (!storyId || !pubKey || !signature) {
+        return res.status(400).json({ error: "Missing fields." });
+    }
+
+    try {
+        // 1. Find Story
+        const story = await storiesCollection.findOne({ _id: new ObjectId(storyId) });
+        if (!story) return res.status(404).json({ error: "Story not found." });
+
+        // 2. Check Ownership
+        if (story.ownerPubKey !== pubKey) {
+            return res.status(403).json({ error: "Not authorized." });
+        }
+
+        // 3. Verify Signature (Sign the Story ID)
+        const isAuthentic = await verifySignature(pubKey, signature, storyId);
+        if (!isAuthentic) {
+            return res.status(403).json({ error: "Invalid signature." });
+        }
+
+        // 4. Delete
+        await storiesCollection.deleteOne({ _id: new ObjectId(storyId) });
+        
+        console.log(`🗑️ Story deleted by ${pubKey.slice(0,10)}...`);
+        res.json({ success: true });
+
+    } catch (err) {
+        console.error("Story delete error:", err);
+        res.status(500).json({ error: "Server error." });
+    }
+});
+
+/**
  * [PUBLIC] Fetch the full media blob for a specific story.
  */
 app.get("/stories/fetch/:storyId", async (req, res) => {
