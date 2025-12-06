@@ -2122,24 +2122,26 @@ app.post("/group/leave", async (req, res) => {
  * [AUTHENTICATED] Post a new Story.
  * Stores encrypted blob with a 24h TTL.
  */
+/**
+ * [AUTHENTICATED] Post a new Story.
+ * Stores encrypted blob with a 24h TTL.
+ */
 app.post("/stories/post", async (req, res) => {
-    const { pubKey, signature, encryptedBlob, thumbnailBlob, mediaType, duration } = req.body;
+    // [PHASE 21 FIX] Added 'audioMeta' to destructuring
+    const { pubKey, signature, encryptedBlob, thumbnailBlob, mediaType, duration, audioMeta } = req.body;
 
     if (!pubKey || !signature || !encryptedBlob || !mediaType) {
         return res.status(400).json({ error: "Missing required fields." });
     }
 
-    // 1. Enforce Size Limits (Prevent server overload)
-    // Blob size check (approx 5MB limit for main media)
+    // 1. Enforce Size Limits
     const blobSize = Buffer.byteLength(encryptedBlob, 'utf8');
     if (blobSize > 5 * 1024 * 1024) {
         return res.status(413).json({ error: "Story is too large. Max 5MB." });
     }
 
     try {
-        // 2. Verify Signature (User signs the encryptedBlob string to prove ownership)
-        // We sign the blob itself (or a hash of it) to ensure integrity.
-        // For simplicity/speed here, we assume client signed the 'encryptedBlob' string.
+        // 2. Verify Signature
         const isAuthentic = await verifySignature(pubKey, signature, encryptedBlob);
         if (!isAuthentic) {
             return res.status(403).json({ error: "Invalid signature." });
@@ -2148,11 +2150,15 @@ app.post("/stories/post", async (req, res) => {
         // 3. Store in DB
         const newStory = {
             ownerPubKey: pubKey,
-            mediaType: mediaType, // 'image' or 'video'
-            duration: duration || 5000, // Client tells us how long to play it
-            encryptedBlob: encryptedBlob, // The heavy data
-            thumbnailBlob: thumbnailBlob || null, // Small preview
-            createdAt: new Date() // TTL index uses this
+            mediaType: mediaType, 
+            duration: duration || 5000, 
+            encryptedBlob: encryptedBlob, 
+            thumbnailBlob: thumbnailBlob || null,
+            
+            // [PHASE 21 FIX] Explicitly save the audio metadata
+            audioMeta: audioMeta || null, 
+            
+            createdAt: new Date() 
         };
 
         const result = await storiesCollection.insertOne(newStory);
@@ -2165,7 +2171,6 @@ app.post("/stories/post", async (req, res) => {
         res.status(500).json({ error: "Server error posting story." });
     }
 });
-
 /**
  * [PUBLIC] List active stories for a user.
  * Returns IDs and Thumbnails only (Lightweight).
